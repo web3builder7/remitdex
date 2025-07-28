@@ -227,6 +227,6 @@ export class KYCService {
       }
     };
 
-    return sep12Fields[anchorCode] || {};
+    return (sep12Fields as any)[anchorCode] || {};
   }
 }
