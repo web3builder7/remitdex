@@ -1,6 +1,13 @@
 import { OneInchAggregator } from './OneInchAggregator';
 import { StellarAnchorService } from './StellarAnchorService';
 import { StellarBridge } from './StellarBridge';
+import { DeliveryMethodHandler } from './delivery/DeliveryMethodHandler';
+import { AnchorIntegrations } from './anchors/AnchorIntegrations';
+import { SEP6Service } from './anchors/SEP6Service';
+import { SEP24Service } from './anchors/SEP24Service';
+import { DeliveryErrorHandler } from './delivery/DeliveryErrorHandler';
+import { OrderRepository } from './database/OrderRepository';
+import { MetricsCollector } from './monitoring/MetricsCollector';
 import { 
   RemittanceQuote, 
   RemittanceOrder, 
@@ -13,6 +20,13 @@ export class RemittanceEngine {
   private anchorService: StellarAnchorService;
   private stellarBridge: StellarBridge;
   private orders: Map<string, RemittanceOrder>;
+  private deliveryHandler: DeliveryMethodHandler;
+  private anchorIntegrations: AnchorIntegrations;
+  private sep6Service: SEP6Service;
+  private sep24Service: SEP24Service;
+  private errorHandler: DeliveryErrorHandler;
+  private orderRepository: OrderRepository;
+  private metricsCollector: MetricsCollector;
 
   constructor(
     oneInchApiKey: string,
@@ -22,6 +36,15 @@ export class RemittanceEngine {
     this.anchorService = new StellarAnchorService(stellarNetwork);
     this.stellarBridge = new StellarBridge(stellarNetwork);
     this.orders = new Map();
+    
+    // Initialize new services
+    this.deliveryHandler = new DeliveryMethodHandler();
+    this.anchorIntegrations = new AnchorIntegrations();
+    this.sep6Service = new SEP6Service();
+    this.sep24Service = new SEP24Service();
+    this.orderRepository = new OrderRepository();
+    this.metricsCollector = new MetricsCollector();
+    this.errorHandler = new DeliveryErrorHandler(this.orderRepository, this.metricsCollector);
   }
 
   async getQuote(params: {
@@ -42,7 +65,7 @@ export class RemittanceEngine {
     if (!anchor) {
       throw new Error(`No anchor available for ${params.toCountry} ${params.toCurrency}`);
     }
-
+ 
     // Step 2: Get 1inch quote to Stellar USDC
     const stellarUSDCAddress = '0x...'; // Wrapped Stellar USDC on source chain
     const oneInchQuote = await this.oneInch.getQuote({
@@ -60,7 +83,7 @@ export class RemittanceEngine {
       params.toCurrency,
       anchor.code
     );
-
+// 
     const usdcAmount = ethers.formatUnits(oneInchQuote.toAmount, 6);
     const localAmount = parseFloat(usdcAmount) * exchangeRate;
 
@@ -136,11 +159,15 @@ export class RemittanceEngine {
       createdAt: new Date()
     };
 
+    // Save order to repository
+    await this.orderRepository.save(order);
     this.orders.set(orderId, order);
 
     try {
       // Step 1: Execute 1inch swap
       order.status = 'processing';
+      await this.orderRepository.updateStatus(orderId, 'processing');
+      
       const swapTx = await this.oneInch.buildSwapTx({
         fromChain: this.getChainId(quote.fromChain),
         fromToken: quote.fromToken,
@@ -159,34 +186,180 @@ export class RemittanceEngine {
       order.htlcId = htlcResult.htlcId;
       order.stellarTxHash = htlcResult.stellarTxHash;
 
-      // Step 3: Initiate anchor withdrawal
+      // Step 3: Determine delivery method and anchor
       const anchor = await this.anchorService.getAnchorForCorridor(
         'US',
         quote.toCountry,
         quote.toCurrency
       );
 
-      if (anchor) {
-        const withdrawId = await this.anchorService.createWithdrawRequest(
-          anchor.code,
-          htlcResult.stellarAccount,
-          quote.toAmount,
-          quote.toCurrency,
-          recipientDetails
-        );
-        order.anchorTxId = withdrawId;
+      if (!anchor) {
+        throw new Error('No anchor available for this corridor');
       }
 
+      // Step 4: Check if we should use SEP-6 or SEP-24
+      const protocol = await this.sep24Service.recommendProtocol(
+        anchor.code,
+        quote.toCurrency
+      );
+
+      let withdrawResult: any;
+
+      if (protocol === 'sep6') {
+        // Use programmatic withdrawal (SEP-6)
+        withdrawResult = await this.processSEP6Withdrawal(
+          anchor.code,
+          quote,
+          recipientDetails,
+          htlcResult.stellarAccount
+        );
+      } else {
+        // Use interactive withdrawal (SEP-24)
+        withdrawResult = await this.processSEP24Withdrawal(
+          anchor.code,
+          quote,
+          recipientDetails,
+          htlcResult.stellarAccount
+        );
+      }
+
+      order.anchorTxId = withdrawResult.id;
       order.status = 'completed';
       order.completedAt = new Date();
 
-    } catch (error) {
+      // Update repository
+      await this.orderRepository.updateStatus(orderId, 'completed', {
+        anchorTxId: withdrawResult.id,
+        completedAt: order.completedAt
+      });
+
+      // Record metrics
+      this.metricsCollector.recordOrder(order);
+
+    } catch (error: any) {
+      // Handle error with proper classification
+      const deliveryError = await this.errorHandler.handleDeliveryError(
+        orderId,
+        error,
+        { quote, recipientDetails }
+      );
+
       order.status = 'failed';
-      console.error('Remittance failed:', error);
-      throw error;
+      throw new Error(this.errorHandler.getUserFriendlyMessage(deliveryError));
     }
 
     return order;
+  }
+
+  private async processSEP6Withdrawal(
+    anchorCode: string,
+    quote: RemittanceQuote,
+    recipientDetails: any,
+    stellarAccount: string
+  ): Promise<any> {
+    // Get delivery method details
+    const deliveryMethods = this.deliveryHandler.getAvailableDeliveryMethods(
+      quote.toCountry,
+      quote.toCurrency
+    );
+
+    const selectedMethod = deliveryMethods.find(
+      m => m.type === recipientDetails.deliveryMethod
+    );
+
+    if (!selectedMethod) {
+      throw new Error('Invalid delivery method');
+    }
+
+    // Use anchor-specific integration
+    switch (anchorCode) {
+      case 'CLICK_PHP':
+        return await this.anchorIntegrations.clickPhilippinesIntegration({
+          action: 'withdraw',
+          amount: quote.toAmount,
+          deliveryMethod: recipientDetails.deliveryMethod,
+          recipient: recipientDetails,
+          stellarAccount
+        });
+
+      case 'COWRIE_NGN':
+        return await this.anchorIntegrations.cowrieNigeriaIntegration({
+          action: 'withdraw',
+          amount: quote.toAmount,
+          deliveryMethod: recipientDetails.deliveryMethod,
+          recipient: recipientDetails,
+          stellarAccount
+        });
+
+      default:
+        // Generic SEP-6 withdrawal
+        await this.sep6Service.authenticate(anchorCode, stellarAccount);
+        return await this.sep6Service.withdraw({
+          anchorCode,
+          asset_code: quote.toCurrency,
+          amount: quote.toAmount,
+          type: recipientDetails.deliveryMethod,
+          account: stellarAccount,
+          ...this.buildSEP6Params(recipientDetails)
+        });
+    }
+  }
+
+  private async processSEP24Withdrawal(
+    anchorCode: string,
+    quote: RemittanceQuote,
+    recipientDetails: any,
+    stellarAccount: string
+  ): Promise<any> {
+    // SEP-24 interactive flow
+    const interactiveResult = await this.sep24Service.initiateWithdraw({
+      anchorCode,
+      asset_code: quote.toCurrency,
+      amount: quote.toAmount,
+      account: stellarAccount,
+      sep9: this.buildSEP9Fields(recipientDetails)
+    });
+
+    // In production, would handle the interactive flow
+    // For now, return the transaction ID
+    return interactiveResult;
+  }
+
+  private buildSEP6Params(recipientDetails: any): any {
+    const params: any = {};
+
+    if (recipientDetails.deliveryMethod === 'bank_transfer') {
+      params.bank_account = {
+        account_number: recipientDetails.accountNumber,
+        bank_name: recipientDetails.bankName,
+        routing_number: recipientDetails.routingNumber,
+        swift_code: recipientDetails.swiftCode
+      };
+    } else if (recipientDetails.deliveryMethod === 'gcash') {
+      params.gcash = {
+        phone_number: recipientDetails.phoneNumber,
+        account_name: recipientDetails.accountName
+      };
+    } else if (recipientDetails.deliveryMethod === 'mobile_money') {
+      params.mobile_money = {
+        phone_number: recipientDetails.phoneNumber,
+        provider: recipientDetails.provider,
+        account_name: recipientDetails.accountName
+      };
+    }
+
+    return params;
+  }
+
+  private buildSEP9Fields(recipientDetails: any): any {
+    return {
+      first_name: recipientDetails.firstName,
+      last_name: recipientDetails.lastName,
+      email_address: recipientDetails.email,
+      mobile_number: recipientDetails.phoneNumber,
+      bank_account_number: recipientDetails.accountNumber,
+      bank_name: recipientDetails.bankName
+    };
   }
 
   async getOrderStatus(orderId: string): Promise<RemittanceOrder | null> {
