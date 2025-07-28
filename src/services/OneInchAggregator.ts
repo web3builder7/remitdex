@@ -29,34 +29,58 @@ export class OneInchAggregator {
     optimism: 10,
     avalanche: 43114
   };
+  private retryCount = 3;
+  private retryDelay = 1000;
 
   constructor(apiKey: string) {
     this.apiKey = apiKey;
   }
 
   async getQuote(params: SwapParams): Promise<SwapQuote> {
-    try {
-      const response = await axios.get(
-        `${this.apiUrl}/${params.fromChain}/quote`,
-        {
-          params: {
-            src: params.fromToken,
-            dst: params.toToken,
-            amount: params.amount,
-            from: params.fromAddress,
-            slippage: params.slippage
-          },
-          headers: {
-            'Authorization': `Bearer ${this.apiKey}`
-          }
+    let lastError: any;
+    
+    for (let attempt = 0; attempt < this.retryCount; attempt++) {
+      try {
+        // Validate inputs
+        if (!this.isValidAddress(params.fromToken) || !this.isValidAddress(params.toToken)) {
+          throw new Error('Invalid token address');
         }
-      );
+        
+        const response = await axios.get(
+          `${this.apiUrl}/${params.fromChain}/quote`,
+          {
+            params: {
+              src: params.fromToken,
+              dst: params.toToken,
+              amount: params.amount,
+              from: params.fromAddress,
+              slippage: params.slippage
+            },
+            headers: {
+              'Authorization': `Bearer ${this.apiKey}`
+            },
+            timeout: 30000 // 30 second timeout
+          }
+        );
 
-      return response.data;
-    } catch (error) {
-      console.error('1inch quote error:', error);
-      throw new Error('Failed to get swap quote');
+        return response.data;
+      } catch (error: any) {
+        lastError = error;
+        
+        // Don't retry on client errors
+        if (error.response && error.response.status >= 400 && error.response.status < 500) {
+          throw this.handleApiError(error);
+        }
+        
+        // Retry on network or server errors
+        if (attempt < this.retryCount - 1) {
+          await this.delay(this.retryDelay * Math.pow(2, attempt)); // Exponential backoff
+          continue;
+        }
+      }
     }
+    
+    throw this.handleApiError(lastError);
   }
 
   async buildSwapTx(params: SwapParams): Promise<any> {
@@ -142,5 +166,57 @@ export class OneInchAggregator {
     };
 
     return stablecoins[chain] || [];
+  }
+
+  private isValidAddress(address: string): boolean {
+    return /^0x[a-fA-F0-9]{40}$/.test(address);
+  }
+
+  private async delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private handleApiError(error: any): Error {
+    if (error.response) {
+      const status = error.response.status;
+      const message = error.response.data?.description || error.response.data?.message || 'Unknown error';
+      
+      switch (status) {
+        case 401:
+          return new Error('Invalid 1inch API key. Please check your configuration.');
+        case 429:
+          return new Error('Rate limit exceeded. Please try again later.');
+        case 400:
+          return new Error(`Bad request: ${message}`);
+        case 404:
+          return new Error('Token pair not found or route not available');
+        default:
+          return new Error(`1inch API error (${status}): ${message}`);
+      }
+    }
+    
+    if (error.code === 'ECONNABORTED') {
+      return new Error('Request timeout - 1inch API took too long to respond');
+    }
+    
+    return new Error(`Network error: ${error.message}`);
+  }
+
+  async healthCheck(): Promise<boolean> {
+    try {
+      // Check Ethereum mainnet tokens endpoint
+      const response = await axios.get(
+        `${this.apiUrl}/1/tokens`,
+        {
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`
+          },
+          timeout: 10000
+        }
+      );
+      return response.status === 200;
+    } catch {
+      return false;
+    }
   }
 }
