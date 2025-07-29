@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { ethers } from 'ethers';
+import { getWrappedStellarUSDC } from '../config/wrapped-stellar-usdc';
 
 interface SwapParams {
   fromChain: number;
@@ -11,11 +12,13 @@ interface SwapParams {
 }
 
 interface SwapQuote {
-  fromToken: any;
-  toToken: any;
-  toAmount: string;
-  protocols: any[];
-  estimatedGas: string;
+  fromToken?: any;
+  toToken?: any;
+  toAmount?: string;
+  dstAmount?: string; // 1inch uses dstAmount
+  protocols?: any[];
+  estimatedGas?: string;
+  gas?: string;
 }
 
 export class OneInchAggregator {
@@ -63,7 +66,14 @@ export class OneInchAggregator {
           }
         );
 
-        return response.data;
+        // Normalize response to match our interface
+        const data = response.data;
+        return {
+          ...data,
+          toAmount: data.dstAmount || data.toAmount,
+          protocols: data.protocols || [],
+          estimatedGas: data.gas || data.estimatedGas || '0'
+        };
       } catch (error: any) {
         lastError = error;
         
@@ -115,34 +125,41 @@ export class OneInchAggregator {
     amount: string,
     userAddress: string
   ): Promise<{chain: string, quote: SwapQuote}> {
-    const stellarUSDC = '0x...'; // Stellar USDC wrapper on each chain
+    // Get wrapped Stellar USDC address for the source chain
+    const wrappedStellarUSDC = getWrappedStellarUSDC(fromChain);
+    if (!wrappedStellarUSDC) {
+      throw new Error(`Wrapped Stellar USDC not available on ${fromChain}`);
+    }
+    
     const quotes = [];
 
-    // Get quotes from all supported chains to Stellar USDC
-    for (const [chainName, chainId] of Object.entries(this.supportedChains)) {
-      if (chainName === fromChain) {
-        try {
-          const quote = await this.getQuote({
-            fromChain: chainId,
-            fromToken,
-            toToken: stellarUSDC,
-            amount,
-            fromAddress: userAddress,
-            slippage: 1
-          });
-          quotes.push({ chain: chainName, quote });
-        } catch (error) {
-          console.log(`No route on ${chainName}`);
-        }
-      }
+    // Get quotes from the source chain to wrapped Stellar USDC
+    const chainId = this.supportedChains[fromChain as keyof typeof this.supportedChains];
+    if (!chainId) {
+      throw new Error(`Unsupported chain: ${fromChain}`);
     }
 
-    // Find best quote (highest output)
-    return quotes.reduce((best, current) => {
-      const bestAmount = ethers.getBigInt(best.quote.toAmount);
-      const currentAmount = ethers.getBigInt(current.quote.toAmount);
-      return currentAmount > bestAmount ? current : best;
-    });
+    try {
+      const quote = await this.getQuote({
+        fromChain: chainId,
+        fromToken,
+        toToken: wrappedStellarUSDC.address,
+        amount,
+        fromAddress: userAddress,
+        slippage: 1
+      });
+      quotes.push({ chain: fromChain, quote });
+    } catch (error) {
+      console.log(`Failed to get quote on ${fromChain}:`, error);
+    }
+
+    // In production, we could also check alternative routes through other chains
+    // For now, just use direct route
+    if (quotes.length === 0) {
+      throw new Error('No routes available');
+    }
+    
+    return quotes[0];
   }
 
   getSupportedTokens(chain: string): string[] {

@@ -14,6 +14,7 @@ import {
   RouteStep 
 } from '../interfaces/IRemittance';
 import { ethers } from 'ethers';
+import { getWrappedStellarUSDC, HTLC_BRIDGE_CONTRACTS } from '../config/wrapped-stellar-usdc';
 
 export class RemittanceEngine {
   private oneInch: OneInchAggregator;
@@ -67,13 +68,17 @@ export class RemittanceEngine {
     }
  
     // Step 2: Get 1inch quote to Stellar USDC
-    const stellarUSDCAddress = '0x...'; // Wrapped Stellar USDC on source chain
+    const wrappedStellarUSDC = getWrappedStellarUSDC(params.fromChain);
+    if (!wrappedStellarUSDC) {
+      throw new Error(`Wrapped Stellar USDC not available on ${params.fromChain}`);
+    }
+    
     const oneInchQuote = await this.oneInch.getQuote({
       fromChain: this.getChainId(params.fromChain),
       fromToken: params.fromToken,
-      toToken: stellarUSDCAddress,
+      toToken: wrappedStellarUSDC.address,
       amount: params.fromAmount,
-      fromAddress: '0x...', // Temp address for quote
+      fromAddress: '0x0000000000000000000000000000000000000000', // Zero address for quotes
       slippage: 1
     });
 
@@ -84,7 +89,7 @@ export class RemittanceEngine {
       anchor.code
     );
 // 
-    const usdcAmount = ethers.formatUnits(oneInchQuote.toAmount, 6);
+    const usdcAmount = ethers.formatUnits(oneInchQuote.toAmount || '0', 6);
     const localAmount = parseFloat(usdcAmount) * exchangeRate;
 
     // Step 4: Build route
@@ -168,10 +173,15 @@ export class RemittanceEngine {
       order.status = 'processing';
       await this.orderRepository.updateStatus(orderId, 'processing');
       
+      const wrappedStellarUSDC = getWrappedStellarUSDC(quote.fromChain);
+      if (!wrappedStellarUSDC) {
+        throw new Error(`Wrapped Stellar USDC not available on ${quote.fromChain}`);
+      }
+      
       const swapTx = await this.oneInch.buildSwapTx({
         fromChain: this.getChainId(quote.fromChain),
         fromToken: quote.fromToken,
-        toToken: '0x...', // Stellar USDC wrapper
+        toToken: wrappedStellarUSDC.address,
         amount: quote.fromAmount,
         fromAddress: senderAddress,
         slippage: 1
