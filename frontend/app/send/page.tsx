@@ -81,6 +81,8 @@ export default function SendMoneyPage() {
         toCurrency: selectedCountry?.currency || '',
         deliveryMethod: formData.deliveryMethod,
       });
+
+      console.log(quoteData,"quotedata");
       
       setQuote(quoteData);
     } catch (err: any) {
