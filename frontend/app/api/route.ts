@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { RemittanceEngine } from '../services/RemittanceEngine';
+import { RemittanceEngine } from '../../services/RemittanceEngine';
 import { config } from 'dotenv';
 
 config();
