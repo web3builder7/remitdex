@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { useAccount } from 'wagmi';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -24,6 +25,7 @@ interface RecipientDetails {
 
 export default function ConfirmPage() {
   const router = useRouter();
+  const { address: evmAddress, isConnected } = useAccount();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
@@ -63,8 +65,30 @@ export default function ConfirmPage() {
     setError(null);
     
     try {
-      // In a real app, you would get the sender address from a connected wallet
-      const senderAddress = '0x1234567890123456789012345678901234567890';
+      let senderAddress: string | undefined;
+      
+      // Check for EVM wallet connection
+      if (isConnected && evmAddress) {
+        senderAddress = evmAddress;
+      } else {
+        // Check for other wallet types
+        const stellarKey = localStorage.getItem('stellarWallet');
+        const solanaKey = localStorage.getItem('solanaWallet');
+        const cosmosKey = localStorage.getItem('cosmosWallet');
+        
+        if (stellarKey) {
+          senderAddress = stellarKey;
+        } else if (solanaKey) {
+          senderAddress = solanaKey;
+        } else if (cosmosKey) {
+          senderAddress = cosmosKey;
+        }
+      }
+      
+      if (!senderAddress) {
+        setError('Please connect your wallet first');
+        return;
+      }
       
       const order = await remittanceAPI.executeRemittance(
         quote,
