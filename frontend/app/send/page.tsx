@@ -12,17 +12,70 @@ import { ArrowRight, Loader2 } from 'lucide-react';
 import { remittanceAPI, RemittanceQuote } from '@/lib/api';
 
 const SUPPORTED_CHAINS = [
-  { value: 'ethereum', label: 'Ethereum' },
-  { value: 'bsc', label: 'Binance Smart Chain' },
-  { value: 'polygon', label: 'Polygon' },
-  { value: 'arbitrum', label: 'Arbitrum' },
+  // EVM Chains
+  { value: 'ethereum', label: 'Ethereum', type: 'evm' },
+  { value: 'bsc', label: 'Binance Smart Chain', type: 'evm' },
+  { value: 'polygon', label: 'Polygon', type: 'evm' },
+  { value: 'arbitrum', label: 'Arbitrum', type: 'evm' },
+  { value: 'optimism', label: 'Optimism', type: 'evm' },
+  { value: 'avalanche', label: 'Avalanche', type: 'evm' },
+  // Non-EVM Chains
+  { value: 'solana', label: 'Solana', type: 'non-evm' },
+  { value: 'stellar', label: 'Stellar', type: 'non-evm' },
+  { value: 'cosmos', label: 'Cosmos', type: 'non-evm' },
+  { value: 'near', label: 'NEAR', type: 'non-evm' },
 ];
 
-const SUPPORTED_TOKENS = [
-  { value: 'USDC', label: 'USDC' },
-  { value: 'USDT', label: 'USDT' },
-  { value: 'DAI', label: 'DAI' },
-];
+const SUPPORTED_TOKENS = {
+  // EVM tokens
+  ethereum: [
+    { value: 'USDC', label: 'USDC' },
+    { value: 'USDT', label: 'USDT' },
+    { value: 'DAI', label: 'DAI' },
+  ],
+  bsc: [
+    { value: 'USDC', label: 'USDC' },
+    { value: 'USDT', label: 'USDT' },
+    { value: 'BUSD', label: 'BUSD' },
+  ],
+  polygon: [
+    { value: 'USDC', label: 'USDC' },
+    { value: 'USDT', label: 'USDT' },
+    { value: 'DAI', label: 'DAI' },
+  ],
+  arbitrum: [
+    { value: 'USDC', label: 'USDC' },
+    { value: 'USDT', label: 'USDT' },
+    { value: 'DAI', label: 'DAI' },
+  ],
+  optimism: [
+    { value: 'USDC', label: 'USDC' },
+    { value: 'USDT', label: 'USDT' },
+    { value: 'DAI', label: 'DAI' },
+  ],
+  avalanche: [
+    { value: 'USDC', label: 'USDC' },
+    { value: 'USDT', label: 'USDT' },
+    { value: 'DAI', label: 'DAI' },
+  ],
+  // Non-EVM tokens
+  solana: [
+    { value: 'USDC', label: 'USDC' },
+    { value: 'USDT', label: 'USDT' },
+  ],
+  stellar: [
+    { value: 'USDC', label: 'USDC' },
+    { value: 'XLM', label: 'XLM' },
+  ],
+  cosmos: [
+    { value: 'USDC', label: 'USDC (axelar)' },
+    { value: 'ATOM', label: 'ATOM' },
+  ],
+  near: [
+    { value: 'USDC', label: 'USDC.e' },
+    { value: 'NEAR', label: 'NEAR' },
+  ],
+};
 
 const SUPPORTED_COUNTRIES = [
   { value: 'Philippines', label: 'Philippines', code: 'PH', currency: 'PHP' },
@@ -62,10 +115,16 @@ export default function SendMoneyPage() {
 
   const selectedCountry = SUPPORTED_COUNTRIES.find(c => c.value === formData.toCountry);
   const availableDeliveryMethods = selectedCountry ? DELIVERY_METHODS[selectedCountry.code as keyof typeof DELIVERY_METHODS] : [];
+  const availableTokens = formData.fromChain ? SUPPORTED_TOKENS[formData.fromChain as keyof typeof SUPPORTED_TOKENS] || [] : [];
 
   const handleInputChange = (field: string, value: string) => {
     setFormData(prev => ({ ...prev, [field]: value }));
     setError(null);
+    
+    // Reset token selection when chain changes
+    if (field === 'fromChain' && value !== formData.fromChain) {
+      setFormData(prev => ({ ...prev, fromChain: value, fromToken: '' }));
+    }
   };
 
   const handleGetQuote = async () => {
@@ -86,6 +145,7 @@ export default function SendMoneyPage() {
       
       setQuote(quoteData);
     } catch (err: any) {
+      console.error('Quote error:', err);
       setError(err.message || 'Failed to get quote');
     } finally {
       setLoading(false);
@@ -148,12 +208,16 @@ export default function SendMoneyPage() {
             {/* Token */}
             <div className="space-y-2">
               <Label htmlFor="fromToken">Token</Label>
-              <Select value={formData.fromToken} onValueChange={(value) => handleInputChange('fromToken', value)}>
+              <Select 
+                value={formData.fromToken} 
+                onValueChange={(value) => handleInputChange('fromToken', value)}
+                disabled={!formData.fromChain}
+              >
                 <SelectTrigger id="fromToken">
-                  <SelectValue placeholder="Select token" />
+                  <SelectValue placeholder={formData.fromChain ? "Select token" : "Select chain first"} />
                 </SelectTrigger>
                 <SelectContent>
-                  {SUPPORTED_TOKENS.map(token => (
+                  {availableTokens.map(token => (
                     <SelectItem key={token.value} value={token.value}>
                       {token.label}
                     </SelectItem>
